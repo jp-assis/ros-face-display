@@ -11,15 +11,19 @@ from queue          import Queue, Empty
 from rclpy.node     import Node
 from std_msgs.msg   import String
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_EXPRESSIONS_DIR = os.path.join(SCRIPT_DIR, "expressions")
-DEFAULT_EXPRESSION_NAME = "blank"
-DEFAULT_FRAME_DELAY_MS  = 80
+SCRIPT_DIR      = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_DIR     = os.path.join(SCRIPT_DIR, "expressions")
+
+DEFAULT_MOOD            = "BLANK"
+DEFAULT_FRAME_DELAY_MS  = 100
 
 class RosSubscriber(Node):
-    def __init__(self, q_expression: Queue):
+    def __init__(self, q_mood: Queue):
         super().__init__("robot_face_sub")
-        self.q_expression = q_expression
+        
+        self.q_mood   = q_mood
+        self._last_command  = DEFAULT_MOOD
+
         self.subscription = self.create_subscription(
             String,
             "/robot_face",
@@ -28,49 +32,53 @@ class RosSubscriber(Node):
         )
 
     def _callback(self, msg: String) -> None:
-        name = msg.data.strip()
-        if name:
-            self.q_expression.put(name)
+        cmd = msg.data.strip().upper()
+        if cmd and cmd != self._last_command:
+            self.q_mood.put(cmd)
+            self._last_command = cmd
 
 
-class ExpressionPlayer:
+class RobotFaceUI:
     def __init__(
         self,
         screen: pygame.Surface,
-        expression_dir: str,
-        default_expression: str,
+        mood_dir: str,
+        default_mood: str,
         frame_delay_ms: int,
-        q_expression: Queue,
+        q_mood: Queue,
     ):
         self.screen = screen
         self.frame_delay_ms = frame_delay_ms
-        self.q_expression   = q_expression
+        self.q_mood = q_mood
 
-        self.expressions = self._load_all_expressions(expression_dir)
-        if not self.expressions:
-            raise RuntimeError("No expressions found in directory.")
+        self.moods = self._load_all_moods(mood_dir)
+        if not self.moods:
+            raise RuntimeError("No moods found in directory.")
 
-        if default_expression not in self.expressions:
-            default_expression = sorted(self.expressions.keys())[0]
+        if default_mood not in self.moods:
+            default_mood = sorted(self.moods.keys())[0]
 
-        self.default_expression = default_expression
-        self.current_name       = default_expression
-        self.current_frames     = self.expressions[default_expression]
+        self.default_mood = default_mood
+        self.current_mood = default_mood
+        self.current_name = default_mood
+        self.current_frames = self.moods[default_mood]
 
         self.index = 0
         self.last_change = pygame.time.get_ticks()
 
     def _check_queue(self) -> None:
-        next_expression = self._get_next_valid_expression()
-        if next_expression is not None:
-            self.play(next_expression)
-        elif self.current_name != self.default_expression:
-            self.play(self.default_expression)
+        next_mood = self._get_next_valid_mood()
+        if next_mood is None:
+            return
 
-    def _get_next_valid_expression(self):
+        if next_mood != self.current_mood:
+            self.current_mood = next_mood
+            self.play(self.current_mood)
+
+    def _get_next_valid_mood(self):
         while True:
             try:
-                name = self.q_expression.get_nowait()
+                name = self.q_mood.get_nowait()
             except Empty:
                 return None
 
@@ -78,12 +86,12 @@ class ExpressionPlayer:
             if not name:
                 continue
 
-            if name in self.expressions:
+            if name in self.moods:
                 return name
 
-            print(f"[WARN] Unknown expression '{name}' ignored.")
+            print(f"[WARN] Unknown mood '{name}' ignored.")
 
-    def _load_expression_frames(self, path: str):
+    def _load_mood_frames(self, path: str):
         frames = []
         for img_name in sorted(os.listdir(path)):
             if img_name.lower().endswith(".jpg"):
@@ -91,22 +99,22 @@ class ExpressionPlayer:
                 frames.append(pygame.image.load(full_path).convert_alpha())
         return frames
 
-    def _load_all_expressions(self, expression_dir: str):
-        expressions = {}
-        if not os.path.isdir(expression_dir):
-            print(f"[ERROR] Expression directory '{expression_dir}' not found.")
-            return expressions
+    def _load_all_moods(self, mood_dir: str):
+        moods = {}
+        if not os.path.isdir(mood_dir):
+            print(f"[ERROR] Mood directory '{mood_dir}' not found.")
+            return moods
 
-        for name in sorted(os.listdir(expression_dir)):
-            full_path = os.path.join(expression_dir, name)
+        for name in sorted(os.listdir(mood_dir)):
+            full_path = os.path.join(mood_dir, name)
             if os.path.isdir(full_path):
-                frames = self._load_expression_frames(full_path)
+                frames = self._load_mood_frames(full_path)
                 if frames:
-                    expressions[name] = frames
+                    moods[name.upper()] = frames
 
-        if not expressions:
-            print(f"[ERROR] No valid expressions in '{expression_dir}'.")
-        return expressions
+        if not moods:
+            print(f"[ERROR] No valid moods in '{mood_dir}'.")
+        return moods
 
     def update(self) -> None:
         now = pygame.time.get_ticks()
@@ -125,31 +133,31 @@ class ExpressionPlayer:
         self.screen.blit(scaled, (0, 0))
 
     def add_to_queue(self, name: str) -> None:
-        self.q_expression.put(name)
+        self.q_mood.put(name)
 
     def play(self, name: str) -> None:
-        if name not in self.expressions:
-            print(f"[WARN] Expression '{name}' not found.")
+        if name not in self.moods:
+            print(f"[WARN] Mood '{name}' not found.")
             return
 
         self.current_name = name
-        self.current_frames = self.expressions[name]
+        self.current_frames = self.moods[name]
         self.index = 0
         self.last_change = pygame.time.get_ticks()
 
 
 # Public
 def parse_args():
-    parser = argparse.ArgumentParser(description="Robot face expression player.")
+    parser = argparse.ArgumentParser(description="Robot face mood player.")
     parser.add_argument(
         "-p", "--path",
-        default=DEFAULT_EXPRESSIONS_DIR,
-        help="Directory containing expression subfolders.",
+        default=DEFAULT_DIR,
+        help="Directory containing mood subfolders.",
     )
     parser.add_argument(
-        "-d", "--default_expression",
-        default=DEFAULT_EXPRESSION_NAME,
-        help="Name of the default expression.",
+        "-d", "--default_mood",
+        default=DEFAULT_MOOD,
+        help="Name of the default mood.",
     )
     parser.add_argument(
         "-f", "--frame_delay",
@@ -166,22 +174,22 @@ def main() -> int:
     screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
     clock = pygame.time.Clock()
 
-    q_expressions: Queue = Queue()
+    q_moods: Queue = Queue()
 
     rclpy.init()
-    ros_subscriber = RosSubscriber(q_expressions)
+    ros_subscriber = RosSubscriber(q_moods)
     thread_rossub = threading.Thread(target=rclpy.spin, args=(ros_subscriber,), daemon=True)
     thread_rossub.start()
 
-    player = ExpressionPlayer(
-        screen              = screen,
-        expression_dir      = args.path,
-        default_expression  = args.default_expression,
-        frame_delay_ms      = args.frame_delay,
-        q_expression        = q_expressions,
+    player = RobotFaceUI(
+        screen        = screen,
+        mood_dir      = args.path,
+        default_mood  = args.default_mood,
+        frame_delay_ms= args.frame_delay,
+        q_mood        = q_moods,
     )
 
-    print(f"Expressions found: {list(player.expressions.keys())}")
+    print(f"Robot moods found: {list(player.moods.keys())}")
 
     running = True
     try:
